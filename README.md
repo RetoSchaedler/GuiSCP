@@ -6,7 +6,7 @@ Installation: sudo dpkg -i guiscp_1.0-1.deb
 ![GuiSCP Screenshot](./screenshotGuiSCP.png)
 Buy me a coffee: https://buymeacoffee.com/retos
 
-GuiSCP is a lightweight, intuitive and fully native SCP/SFTP file transfer client for Linux.
+GuiSCP is an open source, lightweight, intuitive and fully native SCP/SFTP file transfer client for Linux.
 Built as a modern alternative to WinSCP, GuiSCP focuses on simplicity, speed and reliability. With a polished dual-pane interface, it makes secure file transfers effortless — whether you’re managing servers, deploying code, or moving data between systems.
 <br>
 ✔ Native Linux application (no Electron, no Java, no heavy dependencies)<br>
