@@ -4,6 +4,9 @@ Copy files over SSH with a graphical interface.<br>
 
 Tested on Ubuntu.<br>
 Installation: <br>sudo dpkg -i guiscp_1.1-1.deb<br>
+<br>
+Run:<br>
+guiscp<br>
 ![GuiSCP Screenshot](./screenshotGuiSCP.png)
 Buy me a coffee: https://buymeacoffee.com/retos
 
