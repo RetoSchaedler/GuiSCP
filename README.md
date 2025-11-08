@@ -3,7 +3,7 @@ Linux SCP and SFTP GUI Client<br>
 Copy files over SSH with a graphical interface.<br>
 
 Tested on Ubuntu.<br>
-Installation: <br>sudo dpkg -i guiscp_1.0-1.deb<br>
+Installation: <br>sudo dpkg -i guiscp_1.1-1.deb<br>
 ![GuiSCP Screenshot](./screenshotGuiSCP.png)
 Buy me a coffee: https://buymeacoffee.com/retos
 
