@@ -13,7 +13,7 @@
 #include <errno.h>
 
 // Versionsnummer
-#define VERSION "1.1"
+#define VERSION "1.2"
 
 // Enum für Konfliktantworten
 typedef enum {
@@ -94,9 +94,15 @@ void on_delete_remote_clicked(GtkWidget *widget, gpointer data);
 gboolean on_local_tree_key_press(GtkWidget *widget, GdkEventKey *event, gpointer data);
 gboolean on_remote_tree_key_press(GtkWidget *widget, GdkEventKey *event, gpointer data);
 void on_local_drag_data_get(GtkWidget *widget, GdkDragContext *context, GtkSelectionData *data, guint info, guint time, gpointer user_data);
+gboolean on_local_drag_begin(GtkWidget *widget, GdkDragContext *context, gpointer user_data);
 void on_remote_drag_data_received(GtkWidget *widget, GdkDragContext *context, gint x, gint y, GtkSelectionData *data, guint info, guint time, gpointer user_data);
 void on_remote_drag_data_get(GtkWidget *widget, GdkDragContext *context, GtkSelectionData *data, guint info, guint time, gpointer user_data);
+gboolean on_remote_drag_begin(GtkWidget *widget, GdkDragContext *context, gpointer user_data);
 void on_local_drag_data_received(GtkWidget *widget, GdkDragContext *context, gint x, gint y, GtkSelectionData *data, guint info, guint time, gpointer user_data);
+gboolean verify_ssh_fingerprint(ssh_session session, const char *host, int port);
+char* get_known_hosts_file_path(void);
+gboolean is_fingerprint_known(const char *host, int port, unsigned char *hash, size_t hlen);
+void save_fingerprint(const char *host, int port, unsigned char *hash, size_t hlen);
 void create_local_directory(AppData *data, const char *dirname);
 void create_remote_directory(AppData *data, const char *dirname);
 void on_mkdir_local_clicked(GtkWidget *widget, gpointer data);
@@ -201,6 +207,10 @@ void refresh_local_directory(AppData *data) {
                           -1);
     }
     closedir(dir);
+    
+    // Sortierung wieder auf Standard setzen (nach Dateiname)
+    gtk_tree_sortable_set_sort_column_id(GTK_TREE_SORTABLE(data->local_store), 0, GTK_SORT_ASCENDING);
+    
     gtk_label_set_text(GTK_LABEL(data->status_label), "Local directory refreshed");
 }
 
@@ -327,6 +337,9 @@ void refresh_remote_directory_scp(AppData *data) {
     ssh_channel_close(channel);
     ssh_channel_free(channel);
     
+    // Sortierung wieder auf Standard setzen (nach Dateiname)
+    gtk_tree_sortable_set_sort_column_id(GTK_TREE_SORTABLE(data->remote_store), 0, GTK_SORT_ASCENDING);
+    
     gtk_label_set_text(GTK_LABEL(data->status_label), "Remote directory refreshed");
 }
 
@@ -403,6 +416,10 @@ void refresh_remote_directory(AppData *data) {
     }
     
     sftp_closedir(dir);
+    
+    // Sortierung wieder auf Standard setzen (nach Dateiname)
+    gtk_tree_sortable_set_sort_column_id(GTK_TREE_SORTABLE(data->remote_store), 0, GTK_SORT_ASCENDING);
+    
     gtk_label_set_text(GTK_LABEL(data->status_label), "Remote directory refreshed");
 }
 
@@ -442,6 +459,15 @@ void connect_ssh(AppData *data) {
         char msg[256];
         snprintf(msg, sizeof(msg), "Connection error: %s", ssh_get_error(data->session));
         gtk_label_set_text(GTK_LABEL(data->status_label), msg);
+        ssh_free(data->session);
+        data->session = NULL;
+        return;
+    }
+    
+    // Fingerprint-Überprüfung
+    if (!verify_ssh_fingerprint(data->session, host, port)) {
+        // Benutzer hat die Verbindung abgebrochen
+        ssh_disconnect(data->session);
         ssh_free(data->session);
         data->session = NULL;
         return;
@@ -534,17 +560,17 @@ void connect_ssh(AppData *data) {
             return;
         }
         
-        data->sftp = sftp_new(data->session);
-        if (!data->sftp) {
+    data->sftp = sftp_new(data->session);
+    if (!data->sftp) {
             char msg[256];
             snprintf(msg, sizeof(msg), "Error creating SFTP session: %s", ssh_get_error(data->session));
             gtk_label_set_text(GTK_LABEL(data->status_label), msg);
-            ssh_disconnect(data->session);
-            ssh_free(data->session);
-            data->session = NULL;
-            return;
-        }
-        
+        ssh_disconnect(data->session);
+        ssh_free(data->session);
+        data->session = NULL;
+        return;
+    }
+    
         int sftp_init_result = sftp_init(data->sftp);
         if (sftp_init_result != SSH_OK) {
             char msg[512];
@@ -565,13 +591,13 @@ void connect_ssh(AppData *data) {
                     sftp_init_result, error_msg ? error_msg : "Unknown error");
             }
             
-            gtk_label_set_text(GTK_LABEL(data->status_label), msg);
-            sftp_free(data->sftp);
+        gtk_label_set_text(GTK_LABEL(data->status_label), msg);
+        sftp_free(data->sftp);
             data->sftp = NULL;
-            ssh_disconnect(data->session);
-            ssh_free(data->session);
-            data->session = NULL;
-            return;
+        ssh_disconnect(data->session);
+        ssh_free(data->session);
+        data->session = NULL;
+        return;
         }
     }
     
@@ -2029,7 +2055,7 @@ void on_copy_to_remote_clicked(GtkWidget *widget, gpointer data) {
         GtkTreeIter tree_iter;
         
         if (gtk_tree_model_get_iter(model, &tree_iter, path)) {
-            gchar *filename;
+    gchar *filename;
             gtk_tree_model_get(model, &tree_iter, 0, &filename, -1);
             
             // Ignoriere ".." und "."
@@ -2037,7 +2063,7 @@ void on_copy_to_remote_clicked(GtkWidget *widget, gpointer data) {
                 filtered_rows = g_list_append(filtered_rows, gtk_tree_path_copy(path));
             }
             
-            g_free(filename);
+        g_free(filename);
         }
         
         iter = iter->next;
@@ -2071,20 +2097,20 @@ void on_copy_to_remote_clicked(GtkWidget *widget, gpointer data) {
             gchar *filename;
             gchar *type;
             gtk_tree_model_get(model, &tree_iter, 0, &filename, 1, &type, -1);
-            
-            char local_full_path[2048];
-            char remote_full_path[2048];
-            snprintf(local_full_path, sizeof(local_full_path), "%s/%s", local_path_text, filename);
-            snprintf(remote_full_path, sizeof(remote_full_path), "%s/%s", remote_path_text, filename);
-            
+    
+    char local_full_path[2048];
+    char remote_full_path[2048];
+    snprintf(local_full_path, sizeof(local_full_path), "%s/%s", local_path_text, filename);
+    snprintf(remote_full_path, sizeof(remote_full_path), "%s/%s", remote_path_text, filename);
+    
             if (g_strcmp0(type, "Directory") == 0) {
                 copy_directory_to_remote(app, local_full_path, remote_full_path);
             } else {
-                copy_file_to_remote(app, local_full_path, remote_full_path);
+    copy_file_to_remote(app, local_full_path, remote_full_path);
             }
-            
-            g_free(filename);
-            g_free(type);
+    
+    g_free(filename);
+    g_free(type);
         }
         
         iter = iter->next;
@@ -2152,8 +2178,8 @@ void on_copy_to_local_clicked(GtkWidget *widget, gpointer data) {
         GtkTreeIter tree_iter;
         
         if (gtk_tree_model_get_iter(model, &tree_iter, path)) {
-            gchar *filename;
-            gchar *type;
+    gchar *filename;
+    gchar *type;
             gtk_tree_model_get(model, &tree_iter, 0, &filename, 1, &type, -1);
             
             char local_full_path[2048];
@@ -2167,8 +2193,8 @@ void on_copy_to_local_clicked(GtkWidget *widget, gpointer data) {
                 copy_file_from_remote(app, remote_full_path, local_full_path);
             }
             
-            g_free(filename);
-            g_free(type);
+        g_free(filename);
+        g_free(type);
         }
         
         iter = iter->next;
@@ -2421,6 +2447,34 @@ gboolean on_remote_tree_key_press(GtkWidget *widget, GdkEventKey *event, gpointe
     return FALSE; // Event weiterleiten
 }
 
+// Drag-and-Drop: Lokale TreeView - Drag-Beginn (sichert Auswahl)
+gboolean on_local_drag_begin(GtkWidget *widget, GdkDragContext *context, gpointer user_data) {
+    AppData *app = (AppData *)user_data;
+    GtkTreeSelection *selection = gtk_tree_view_get_selection(GTK_TREE_VIEW(app->local_tree));
+    
+    // Stelle sicher, dass die Auswahl beibehalten wird
+    // Die Auswahl wird bereits in drag-data-get verwendet
+    (void)widget;
+    (void)context;
+    (void)selection;
+    
+    return FALSE; // Weiterleiten
+}
+
+// Drag-and-Drop: Remote TreeView - Drag-Beginn (sichert Auswahl)
+gboolean on_remote_drag_begin(GtkWidget *widget, GdkDragContext *context, gpointer user_data) {
+    AppData *app = (AppData *)user_data;
+    GtkTreeSelection *selection = gtk_tree_view_get_selection(GTK_TREE_VIEW(app->remote_tree));
+    
+    // Stelle sicher, dass die Auswahl beibehalten wird
+    // Die Auswahl wird bereits in drag-data-get verwendet
+    (void)widget;
+    (void)context;
+    (void)selection;
+    
+    return FALSE; // Weiterleiten
+}
+
 // Drag-and-Drop: Lokale TreeView - Daten für Drag bereitstellen
 void on_local_drag_data_get(GtkWidget *widget, GdkDragContext *context, GtkSelectionData *data, guint info, guint time, gpointer user_data) {
     AppData *app = (AppData *)user_data;
@@ -2509,9 +2563,9 @@ void on_remote_drag_data_received(GtkWidget *widget, GdkDragContext *context, gi
     // Kopiere alle Dateien
     for (int i = 0; lines[i] != NULL && !app->copy_aborted; i++) {
         if (strlen(lines[i]) == 0) continue;
-        
-        char local_full_path[2048];
-        char remote_full_path[2048];
+    
+    char local_full_path[2048];
+    char remote_full_path[2048];
         snprintf(local_full_path, sizeof(local_full_path), "%s/%s", local_path_text, lines[i]);
         snprintf(remote_full_path, sizeof(remote_full_path), "%s/%s", remote_path_text, lines[i]);
         
@@ -2730,7 +2784,7 @@ void on_delete_local_clicked(GtkWidget *widget, gpointer data) {
             gtk_tree_model_get(model, &iter, 0, &filename, -1);
             const char *local_path_text = gtk_entry_get_text(GTK_ENTRY(app->local_path_entry));
             char local_full_path[2048];
-            snprintf(local_full_path, sizeof(local_full_path), "%s/%s", local_path_text, filename);
+    snprintf(local_full_path, sizeof(local_full_path), "%s/%s", local_path_text, filename);
             
             confirm_dialog = gtk_message_dialog_new(NULL,
                                                     GTK_DIALOG_MODAL,
@@ -2879,8 +2933,8 @@ void on_delete_remote_clicked(GtkWidget *widget, gpointer data) {
             gtk_tree_model_get(model, &iter, 0, &filename, -1);
             const char *remote_path_text = gtk_entry_get_text(GTK_ENTRY(app->remote_path_entry));
             char remote_full_path[2048];
-            snprintf(remote_full_path, sizeof(remote_full_path), "%s/%s", remote_path_text, filename);
-            
+    snprintf(remote_full_path, sizeof(remote_full_path), "%s/%s", remote_path_text, filename);
+    
             confirm_dialog = gtk_message_dialog_new(NULL,
                                                     GTK_DIALOG_MODAL,
                                                     GTK_MESSAGE_QUESTION,
@@ -2927,9 +2981,9 @@ void on_delete_remote_clicked(GtkWidget *widget, gpointer data) {
                 char *item_info = g_malloc(2048);
                 snprintf(item_info, 2048, "%s|%s", remote_full_path, type);
                 paths_to_delete = g_list_append(paths_to_delete, item_info);
-                
-                g_free(filename);
-                g_free(type);
+    
+    g_free(filename);
+    g_free(type);
                 g_free(remote_full_path);
             }
             
@@ -3235,6 +3289,167 @@ char* get_config_file_path(void) {
     char *config_file = g_build_filename(config_dir, "connections.ini", NULL);
     g_free(config_dir);
     return config_file;
+}
+
+// Pfad zur known_hosts Datei
+char* get_known_hosts_file_path(void) {
+    const char *home = g_get_home_dir();
+    char *config_dir = g_build_filename(home, ".guiscp", NULL);
+    
+    // Erstelle Verzeichnis falls nicht vorhanden
+    if (!g_file_test(config_dir, G_FILE_TEST_IS_DIR)) {
+        g_mkdir_with_parents(config_dir, 0700);
+    }
+    
+    char *known_hosts_file = g_build_filename(config_dir, "known_hosts", NULL);
+    g_free(config_dir);
+    
+    return known_hosts_file;
+}
+
+// Prüfe, ob Fingerprint bekannt ist
+gboolean is_fingerprint_known(const char *host, int port, unsigned char *hash, size_t hlen) {
+    char *known_hosts_file = get_known_hosts_file_path();
+    FILE *fp = fopen(known_hosts_file, "r");
+    g_free(known_hosts_file);
+    
+    if (!fp) {
+        return FALSE;
+    }
+    
+    char line[1024];
+    char host_port[256];
+    snprintf(host_port, sizeof(host_port), "%s:%d", host, port);
+    
+    while (fgets(line, sizeof(line), fp)) {
+        // Format: host:port hash_hex
+        char *space = strchr(line, ' ');
+        if (space) {
+            *space = '\0';
+            if (strcmp(line, host_port) == 0) {
+                // Host gefunden, prüfe Hash
+                space++;
+                char *hash_str = space;
+                // Entferne Newline
+                char *newline = strchr(hash_str, '\n');
+                if (newline) *newline = '\0';
+                
+                // Konvertiere Hex-String zu Bytes
+                size_t hash_len = strlen(hash_str) / 2;
+                if (hash_len == hlen) {
+                    unsigned char stored_hash[64];
+                    int match = 1;
+                    for (size_t i = 0; i < hash_len; i++) {
+                        char hex[3] = {hash_str[i*2], hash_str[i*2+1], '\0'};
+                        stored_hash[i] = (unsigned char)strtoul(hex, NULL, 16);
+                        if (stored_hash[i] != hash[i]) {
+                            match = 0;
+                            break;
+                        }
+                    }
+                    fclose(fp);
+                    return match ? TRUE : FALSE;
+                }
+            }
+        }
+    }
+    
+    fclose(fp);
+    return FALSE;
+}
+
+// Speichere Fingerprint
+void save_fingerprint(const char *host, int port, unsigned char *hash, size_t hlen) {
+    char *known_hosts_file = get_known_hosts_file_path();
+    FILE *fp = fopen(known_hosts_file, "a");
+    g_free(known_hosts_file);
+    
+    if (!fp) {
+        return;
+    }
+    
+    fprintf(fp, "%s:%d ", host, port);
+    for (size_t i = 0; i < hlen; i++) {
+        fprintf(fp, "%02x", hash[i]);
+    }
+    fprintf(fp, "\n");
+    
+    fclose(fp);
+}
+
+// Fingerprint-Überprüfung
+gboolean verify_ssh_fingerprint(ssh_session session, const char *host, int port) {
+    ssh_key srv_pubkey = NULL;
+    unsigned char *hash = NULL;
+    size_t hlen = 0;
+    
+    // Hole Server-Public-Key
+    if (ssh_get_server_publickey(session, &srv_pubkey) != SSH_OK) {
+        return FALSE;
+    }
+    
+    // Hole Hash (MD5)
+    if (ssh_get_publickey_hash(srv_pubkey, SSH_PUBLICKEY_HASH_MD5, &hash, &hlen) != SSH_OK) {
+        ssh_key_free(srv_pubkey);
+        return FALSE;
+    }
+    
+    // Prüfe, ob Fingerprint bekannt ist
+    if (is_fingerprint_known(host, port, hash, hlen)) {
+        ssh_key_free(srv_pubkey);
+        ssh_clean_pubkey_hash(&hash);
+        return TRUE;
+    }
+    
+    // Fingerprint ist unbekannt - zeige Warnung
+    char fingerprint_str[128];
+    fingerprint_str[0] = '\0';
+    for (size_t i = 0; i < hlen; i++) {
+        char hex[4];
+        snprintf(hex, sizeof(hex), "%02x", hash[i]);
+        if (i > 0) {
+            strcat(fingerprint_str, ":");
+        }
+        strcat(fingerprint_str, hex);
+    }
+    
+    char msg[1024];
+    snprintf(msg, sizeof(msg),
+        "WARNING: The authenticity of host '%s:%d' can't be established.\n\n"
+        "The server's fingerprint is:\n"
+        "MD5: %s\n\n"
+        "This is the first time you are connecting to this server.\n"
+        "If you trust this server, click 'Accept' to save the fingerprint.\n"
+        "If you don't trust this server, click 'Cancel' to abort the connection.",
+        host, port, fingerprint_str);
+    
+    GtkWidget *dialog = gtk_message_dialog_new(NULL,
+                                               GTK_DIALOG_MODAL,
+                                               GTK_MESSAGE_WARNING,
+                                               GTK_BUTTONS_NONE,
+                                               "%s", msg);
+    gtk_window_set_title(GTK_WINDOW(dialog), "SSH Host Key Verification");
+    
+    gtk_dialog_add_button(GTK_DIALOG(dialog), "Accept", GTK_RESPONSE_ACCEPT);
+    gtk_dialog_add_button(GTK_DIALOG(dialog), "Cancel", GTK_RESPONSE_CANCEL);
+    
+    gtk_dialog_set_default_response(GTK_DIALOG(dialog), GTK_RESPONSE_CANCEL);
+    
+    gint response = gtk_dialog_run(GTK_DIALOG(dialog));
+    gtk_widget_destroy(dialog);
+    
+    if (response == GTK_RESPONSE_ACCEPT) {
+        // Speichere Fingerprint
+        save_fingerprint(host, port, hash, hlen);
+        ssh_key_free(srv_pubkey);
+        ssh_clean_pubkey_hash(&hash);
+        return TRUE;
+    } else {
+        // Benutzer hat abgebrochen
+        ssh_key_free(srv_pubkey);
+        ssh_clean_pubkey_hash(&hash);
+        return FALSE;
+    }
 }
 
 // Gespeicherte Verbindungsnamen abrufen
@@ -3759,6 +3974,9 @@ GtkWidget* create_gui(AppData *data) {
     gtk_tree_view_column_set_sort_column_id(column, 2);
     gtk_tree_view_append_column(GTK_TREE_VIEW(data->local_tree), column);
     
+    // Standard-Sortierung nach Dateiname (Spalte 0, aufsteigend)
+    gtk_tree_sortable_set_sort_column_id(GTK_TREE_SORTABLE(data->local_store), 0, GTK_SORT_ASCENDING);
+    
     g_signal_connect(data->local_tree, "row-activated", G_CALLBACK(on_local_row_activated), data);
     g_signal_connect(data->local_tree, "key-press-event", G_CALLBACK(on_local_tree_key_press), data);
     gtk_widget_set_can_focus(data->local_tree, TRUE);
@@ -3768,6 +3986,7 @@ GtkWidget* create_gui(AppData *data) {
         { "text/plain", 0, 0 }
     };
     gtk_tree_view_enable_model_drag_source(GTK_TREE_VIEW(data->local_tree), GDK_BUTTON1_MASK, targets, 1, GDK_ACTION_COPY);
+    g_signal_connect(data->local_tree, "drag-begin", G_CALLBACK(on_local_drag_begin), data);
     g_signal_connect(data->local_tree, "drag-data-get", G_CALLBACK(on_local_drag_data_get), data);
     
     // Drag-and-Drop: Lokale TreeView als Drop-Target (für Drop von Remote)
@@ -3834,6 +4053,9 @@ GtkWidget* create_gui(AppData *data) {
     gtk_tree_view_column_set_sort_column_id(column, 2);
     gtk_tree_view_append_column(GTK_TREE_VIEW(data->remote_tree), column);
     
+    // Standard-Sortierung nach Dateiname (Spalte 0, aufsteigend)
+    gtk_tree_sortable_set_sort_column_id(GTK_TREE_SORTABLE(data->remote_store), 0, GTK_SORT_ASCENDING);
+    
     g_signal_connect(data->remote_tree, "row-activated", G_CALLBACK(on_remote_row_activated), data);
     g_signal_connect(data->remote_tree, "key-press-event", G_CALLBACK(on_remote_tree_key_press), data);
     gtk_widget_set_can_focus(data->remote_tree, TRUE);
@@ -3843,6 +4065,7 @@ GtkWidget* create_gui(AppData *data) {
         { "text/plain", 0, 0 }
     };
     gtk_tree_view_enable_model_drag_source(GTK_TREE_VIEW(data->remote_tree), GDK_BUTTON1_MASK, targets_remote, 1, GDK_ACTION_COPY);
+    g_signal_connect(data->remote_tree, "drag-begin", G_CALLBACK(on_remote_drag_begin), data);
     g_signal_connect(data->remote_tree, "drag-data-get", G_CALLBACK(on_remote_drag_data_get), data);
     
     // Drag-and-Drop: Remote TreeView als Drop-Target (für Drop von Local)
