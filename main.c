@@ -13,7 +13,7 @@
 #include <errno.h>
 
 // Versionsnummer
-#define VERSION "1.0"
+#define VERSION "1.1"
 
 // Enum für Konfliktantworten
 typedef enum {
@@ -91,6 +91,12 @@ void delete_remote_directory_sftp(AppData *data, const char *path);
 void delete_remote_directory_scp(AppData *data, const char *path);
 void on_delete_local_clicked(GtkWidget *widget, gpointer data);
 void on_delete_remote_clicked(GtkWidget *widget, gpointer data);
+gboolean on_local_tree_key_press(GtkWidget *widget, GdkEventKey *event, gpointer data);
+gboolean on_remote_tree_key_press(GtkWidget *widget, GdkEventKey *event, gpointer data);
+void on_local_drag_data_get(GtkWidget *widget, GdkDragContext *context, GtkSelectionData *data, guint info, guint time, gpointer user_data);
+void on_remote_drag_data_received(GtkWidget *widget, GdkDragContext *context, gint x, gint y, GtkSelectionData *data, guint info, guint time, gpointer user_data);
+void on_remote_drag_data_get(GtkWidget *widget, GdkDragContext *context, GtkSelectionData *data, guint info, guint time, gpointer user_data);
+void on_local_drag_data_received(GtkWidget *widget, GdkDragContext *context, gint x, gint y, GtkSelectionData *data, guint info, guint time, gpointer user_data);
 void create_local_directory(AppData *data, const char *dirname);
 void create_remote_directory(AppData *data, const char *dirname);
 void on_mkdir_local_clicked(GtkWidget *widget, gpointer data);
@@ -515,25 +521,57 @@ void connect_ssh(AppData *data) {
     
     // SFTP-Session nur erstellen, wenn SFTP gewählt wurde
     if (!data->use_scp) {
-    data->sftp = sftp_new(data->session);
-    if (!data->sftp) {
-            gtk_label_set_text(GTK_LABEL(data->status_label), "Error creating SFTP session");
-        ssh_disconnect(data->session);
-        ssh_free(data->session);
-        data->session = NULL;
-        return;
-    }
-    
-    if (sftp_init(data->sftp) != SSH_OK) {
-        char msg[256];
-            snprintf(msg, sizeof(msg), "SFTP init error: %s", ssh_get_error(data->session));
-        gtk_label_set_text(GTK_LABEL(data->status_label), msg);
-        sftp_free(data->sftp);
-        ssh_disconnect(data->session);
-        ssh_free(data->session);
-        data->session = NULL;
-        data->sftp = NULL;
-        return;
+        // Prüfe, ob die SSH-Session noch gültig ist
+        if (!data->session || ssh_is_connected(data->session) == 0) {
+            char msg[256];
+            snprintf(msg, sizeof(msg), "SSH session not connected. Cannot create SFTP session.");
+            gtk_label_set_text(GTK_LABEL(data->status_label), msg);
+            if (data->session) {
+                ssh_disconnect(data->session);
+                ssh_free(data->session);
+                data->session = NULL;
+            }
+            return;
+        }
+        
+        data->sftp = sftp_new(data->session);
+        if (!data->sftp) {
+            char msg[256];
+            snprintf(msg, sizeof(msg), "Error creating SFTP session: %s", ssh_get_error(data->session));
+            gtk_label_set_text(GTK_LABEL(data->status_label), msg);
+            ssh_disconnect(data->session);
+            ssh_free(data->session);
+            data->session = NULL;
+            return;
+        }
+        
+        int sftp_init_result = sftp_init(data->sftp);
+        if (sftp_init_result != SSH_OK) {
+            char msg[512];
+            const char *error_msg = ssh_get_error(data->session);
+            
+            // Spezielle Behandlung für "Channel request subsystem failed"
+            if (error_msg && strstr(error_msg, "subsystem") != NULL) {
+                snprintf(msg, sizeof(msg), 
+                    "SFTP subsystem not available on server.\n\n"
+                    "The server does not support SFTP or the SFTP subsystem is not enabled.\n"
+                    "This is a server configuration issue.\n\n"
+                    "Solution: Use SCP protocol instead (it works with your server).\n"
+                    "The server administrator needs to enable the SFTP subsystem in sshd_config.");
+            } else {
+                snprintf(msg, sizeof(msg), 
+                    "SFTP init error (code %d): %s\n\n"
+                    "Note: Some servers may not support SFTP. Try using SCP protocol instead.", 
+                    sftp_init_result, error_msg ? error_msg : "Unknown error");
+            }
+            
+            gtk_label_set_text(GTK_LABEL(data->status_label), msg);
+            sftp_free(data->sftp);
+            data->sftp = NULL;
+            ssh_disconnect(data->session);
+            ssh_free(data->session);
+            data->session = NULL;
+            return;
         }
     }
     
@@ -1983,6 +2021,39 @@ void on_copy_to_remote_clicked(GtkWidget *widget, gpointer data) {
         return;
     }
     
+    // Filtere ".." und "." aus der Auswahl
+    GList *filtered_rows = NULL;
+    GList *iter = selected_rows;
+    while (iter) {
+        GtkTreePath *path = (GtkTreePath *)iter->data;
+        GtkTreeIter tree_iter;
+        
+        if (gtk_tree_model_get_iter(model, &tree_iter, path)) {
+            gchar *filename;
+            gtk_tree_model_get(model, &tree_iter, 0, &filename, -1);
+            
+            // Ignoriere ".." und "."
+            if (filename && strcmp(filename, "..") != 0 && strcmp(filename, ".") != 0) {
+                filtered_rows = g_list_append(filtered_rows, gtk_tree_path_copy(path));
+            }
+            
+            g_free(filename);
+        }
+        
+        iter = iter->next;
+    }
+    
+    // Gib die ursprüngliche Liste frei
+    g_list_free_full(selected_rows, (GDestroyNotify)gtk_tree_path_free);
+    
+    // Prüfe, ob nach dem Filtern noch Elemente übrig sind
+    if (!filtered_rows) {
+        gtk_label_set_text(GTK_LABEL(app->status_label), "No valid files selected ('.' and '..' are ignored)");
+        return;
+    }
+    
+    selected_rows = filtered_rows;
+    
     // Reset Konflikt-Flags
     app->overwrite_all = 0;
     app->skip_all = 0;
@@ -1991,7 +2062,7 @@ void on_copy_to_remote_clicked(GtkWidget *widget, gpointer data) {
     const char *local_path_text = gtk_entry_get_text(GTK_ENTRY(app->local_path_entry));
     const char *remote_path_text = gtk_entry_get_text(GTK_ENTRY(app->remote_path_entry));
     
-    GList *iter = selected_rows;
+    iter = selected_rows;
     while (iter && !app->copy_aborted) {
         GtkTreePath *path = (GtkTreePath *)iter->data;
         GtkTreeIter tree_iter;
@@ -2034,6 +2105,39 @@ void on_copy_to_local_clicked(GtkWidget *widget, gpointer data) {
         return;
     }
     
+    // Filtere ".." und "." aus der Auswahl
+    GList *filtered_rows = NULL;
+    GList *iter = selected_rows;
+    while (iter) {
+        GtkTreePath *path = (GtkTreePath *)iter->data;
+        GtkTreeIter tree_iter;
+        
+        if (gtk_tree_model_get_iter(model, &tree_iter, path)) {
+            gchar *filename;
+            gtk_tree_model_get(model, &tree_iter, 0, &filename, -1);
+            
+            // Ignoriere ".." und "."
+            if (filename && strcmp(filename, "..") != 0 && strcmp(filename, ".") != 0) {
+                filtered_rows = g_list_append(filtered_rows, gtk_tree_path_copy(path));
+            }
+            
+            g_free(filename);
+        }
+        
+        iter = iter->next;
+    }
+    
+    // Gib die ursprüngliche Liste frei
+    g_list_free_full(selected_rows, (GDestroyNotify)gtk_tree_path_free);
+    
+    // Prüfe, ob nach dem Filtern noch Elemente übrig sind
+    if (!filtered_rows) {
+        gtk_label_set_text(GTK_LABEL(app->status_label), "No valid files selected ('.' and '..' are ignored)");
+        return;
+    }
+    
+    selected_rows = filtered_rows;
+    
     // Reset Konflikt-Flags
     app->overwrite_all = 0;
     app->skip_all = 0;
@@ -2042,7 +2146,7 @@ void on_copy_to_local_clicked(GtkWidget *widget, gpointer data) {
     const char *local_path_text = gtk_entry_get_text(GTK_ENTRY(app->local_path_entry));
     const char *remote_path_text = gtk_entry_get_text(GTK_ENTRY(app->remote_path_entry));
     
-    GList *iter = selected_rows;
+    iter = selected_rows;
     while (iter && !app->copy_aborted) {
         GtkTreePath *path = (GtkTreePath *)iter->data;
         GtkTreeIter tree_iter;
@@ -2299,6 +2403,276 @@ void delete_remote_file(AppData *data, const char *path) {
 }
 
 // Callback für Delete-Button (Lokal)
+// Keyboard-Handler für lokale TreeView
+gboolean on_local_tree_key_press(GtkWidget *widget, GdkEventKey *event, gpointer data) {
+    if (event->keyval == GDK_KEY_Delete || event->keyval == GDK_KEY_KP_Delete) {
+        on_delete_local_clicked(widget, data);
+        return TRUE; // Event wurde behandelt
+    }
+    return FALSE; // Event weiterleiten
+}
+
+// Keyboard-Handler für Remote TreeView
+gboolean on_remote_tree_key_press(GtkWidget *widget, GdkEventKey *event, gpointer data) {
+    if (event->keyval == GDK_KEY_Delete || event->keyval == GDK_KEY_KP_Delete) {
+        on_delete_remote_clicked(widget, data);
+        return TRUE; // Event wurde behandelt
+    }
+    return FALSE; // Event weiterleiten
+}
+
+// Drag-and-Drop: Lokale TreeView - Daten für Drag bereitstellen
+void on_local_drag_data_get(GtkWidget *widget, GdkDragContext *context, GtkSelectionData *data, guint info, guint time, gpointer user_data) {
+    AppData *app = (AppData *)user_data;
+    GtkTreeSelection *selection = gtk_tree_view_get_selection(GTK_TREE_VIEW(app->local_tree));
+    GtkTreeModel *model = GTK_TREE_MODEL(app->local_store);
+    
+    GList *selected_rows = gtk_tree_selection_get_selected_rows(selection, &model);
+    if (!selected_rows) {
+        return;
+    }
+    
+    // Sammle alle ausgewählten Dateinamen
+    GString *file_list = g_string_new("");
+    GList *iter = selected_rows;
+    int count = 0;
+    
+    while (iter) {
+        GtkTreePath *path = (GtkTreePath *)iter->data;
+        GtkTreeIter tree_iter;
+        
+        if (gtk_tree_model_get_iter(model, &tree_iter, path)) {
+            gchar *filename;
+            gtk_tree_model_get(model, &tree_iter, 0, &filename, -1);
+            
+            // Ignoriere ".." und "."
+            if (filename && strcmp(filename, "..") != 0 && strcmp(filename, ".") != 0) {
+                if (count > 0) {
+                    g_string_append(file_list, "\n");
+                }
+                g_string_append(file_list, filename);
+                count++;
+            }
+            
+            g_free(filename);
+        }
+        
+        iter = iter->next;
+    }
+    
+    g_list_free_full(selected_rows, (GDestroyNotify)gtk_tree_path_free);
+    
+    if (file_list->len > 0) {
+        gtk_selection_data_set_text(data, file_list->str, -1);
+    }
+    
+    g_string_free(file_list, TRUE);
+}
+
+// Drag-and-Drop: Remote TreeView - Daten beim Drop empfangen
+void on_remote_drag_data_received(GtkWidget *widget, GdkDragContext *context, gint x, gint y, GtkSelectionData *data, guint info, guint time, gpointer user_data) {
+    AppData *app = (AppData *)user_data;
+    
+    if (!app->connected) {
+        gtk_label_set_text(GTK_LABEL(app->status_label), "Not connected!");
+        gtk_drag_finish(context, FALSE, FALSE, time);
+        return;
+    }
+    
+    if (gtk_selection_data_get_length(data) < 0) {
+        gtk_drag_finish(context, FALSE, FALSE, time);
+        return;
+    }
+    
+    gchar *text = (gchar *)gtk_selection_data_get_text(data);
+    if (!text) {
+        gtk_drag_finish(context, FALSE, FALSE, time);
+        return;
+    }
+    
+    // Parse die Dateiliste (durch \n getrennt)
+    gchar **lines = g_strsplit(text, "\n", -1);
+    if (!lines || !lines[0]) {
+        g_free(text);
+        gtk_drag_finish(context, FALSE, FALSE, time);
+        return;
+    }
+    
+    // Reset Konflikt-Flags
+    app->overwrite_all = 0;
+    app->skip_all = 0;
+    app->copy_aborted = 0;
+    
+    const char *local_path_text = gtk_entry_get_text(GTK_ENTRY(app->local_path_entry));
+    const char *remote_path_text = gtk_entry_get_text(GTK_ENTRY(app->remote_path_entry));
+    
+    // Kopiere alle Dateien
+    for (int i = 0; lines[i] != NULL && !app->copy_aborted; i++) {
+        if (strlen(lines[i]) == 0) continue;
+        
+        char local_full_path[2048];
+        char remote_full_path[2048];
+        snprintf(local_full_path, sizeof(local_full_path), "%s/%s", local_path_text, lines[i]);
+        snprintf(remote_full_path, sizeof(remote_full_path), "%s/%s", remote_path_text, lines[i]);
+        
+        // Prüfe, ob es ein Verzeichnis ist
+        struct stat st;
+        if (stat(local_full_path, &st) == 0) {
+            if (S_ISDIR(st.st_mode)) {
+                copy_directory_to_remote(app, local_full_path, remote_full_path);
+            } else {
+                copy_file_to_remote(app, local_full_path, remote_full_path);
+            }
+        }
+    }
+    
+    g_strfreev(lines);
+    g_free(text);
+    gtk_drag_finish(context, TRUE, FALSE, time);
+}
+
+// Drag-and-Drop: Remote TreeView - Daten für Drag bereitstellen
+void on_remote_drag_data_get(GtkWidget *widget, GdkDragContext *context, GtkSelectionData *data, guint info, guint time, gpointer user_data) {
+    AppData *app = (AppData *)user_data;
+    GtkTreeSelection *selection = gtk_tree_view_get_selection(GTK_TREE_VIEW(app->remote_tree));
+    GtkTreeModel *model = GTK_TREE_MODEL(app->remote_store);
+    
+    GList *selected_rows = gtk_tree_selection_get_selected_rows(selection, &model);
+    if (!selected_rows) {
+        return;
+    }
+    
+    // Sammle alle ausgewählten Dateinamen
+    GString *file_list = g_string_new("");
+    GList *iter = selected_rows;
+    int count = 0;
+    
+    while (iter) {
+        GtkTreePath *path = (GtkTreePath *)iter->data;
+        GtkTreeIter tree_iter;
+        
+        if (gtk_tree_model_get_iter(model, &tree_iter, path)) {
+            gchar *filename;
+            gtk_tree_model_get(model, &tree_iter, 0, &filename, -1);
+            
+            // Ignoriere ".." und "."
+            if (filename && strcmp(filename, "..") != 0 && strcmp(filename, ".") != 0) {
+                if (count > 0) {
+                    g_string_append(file_list, "\n");
+                }
+                g_string_append(file_list, filename);
+                count++;
+            }
+            
+            g_free(filename);
+        }
+        
+        iter = iter->next;
+    }
+    
+    g_list_free_full(selected_rows, (GDestroyNotify)gtk_tree_path_free);
+    
+    if (file_list->len > 0) {
+        gtk_selection_data_set_text(data, file_list->str, -1);
+    }
+    
+    g_string_free(file_list, TRUE);
+}
+
+// Drag-and-Drop: Lokale TreeView - Daten beim Drop empfangen
+void on_local_drag_data_received(GtkWidget *widget, GdkDragContext *context, gint x, gint y, GtkSelectionData *data, guint info, guint time, gpointer user_data) {
+    AppData *app = (AppData *)user_data;
+    
+    if (!app->connected) {
+        gtk_label_set_text(GTK_LABEL(app->status_label), "Not connected!");
+        gtk_drag_finish(context, FALSE, FALSE, time);
+        return;
+    }
+    
+    if (gtk_selection_data_get_length(data) < 0) {
+        gtk_drag_finish(context, FALSE, FALSE, time);
+        return;
+    }
+    
+    gchar *text = (gchar *)gtk_selection_data_get_text(data);
+    if (!text) {
+        gtk_drag_finish(context, FALSE, FALSE, time);
+        return;
+    }
+    
+    // Parse die Dateiliste (durch \n getrennt)
+    gchar **lines = g_strsplit(text, "\n", -1);
+    if (!lines || !lines[0]) {
+        g_free(text);
+        gtk_drag_finish(context, FALSE, FALSE, time);
+        return;
+    }
+    
+    // Reset Konflikt-Flags
+    app->overwrite_all = 0;
+    app->skip_all = 0;
+    app->copy_aborted = 0;
+    
+    const char *local_path_text = gtk_entry_get_text(GTK_ENTRY(app->local_path_entry));
+    const char *remote_path_text = gtk_entry_get_text(GTK_ENTRY(app->remote_path_entry));
+    
+    // Kopiere alle Dateien
+    for (int i = 0; lines[i] != NULL && !app->copy_aborted; i++) {
+        if (strlen(lines[i]) == 0) continue;
+        
+        char local_full_path[2048];
+        char remote_full_path[2048];
+        snprintf(local_full_path, sizeof(local_full_path), "%s/%s", local_path_text, lines[i]);
+        snprintf(remote_full_path, sizeof(remote_full_path), "%s/%s", remote_path_text, lines[i]);
+        
+        // Prüfe, ob es ein Verzeichnis ist (Remote)
+        if (app->use_scp) {
+            // Für SCP: Prüfe über SSH-Befehl
+            ssh_channel channel = ssh_channel_new(app->session);
+            if (channel && ssh_channel_open_session(channel) == SSH_OK) {
+                char test_cmd[2048];
+                snprintf(test_cmd, sizeof(test_cmd), "test -d '%s' && echo 'dir' || echo 'file'", remote_full_path);
+                
+                if (ssh_channel_request_exec(channel, test_cmd) == SSH_OK) {
+                    char buffer[64];
+                    int nbytes = ssh_channel_read(channel, buffer, sizeof(buffer) - 1, 0);
+                    if (nbytes > 0) {
+                        buffer[nbytes] = '\0';
+                        char *newline = strchr(buffer, '\n');
+                        if (newline) *newline = '\0';
+                        
+                        if (strcmp(buffer, "dir") == 0) {
+                            copy_directory_from_remote(app, remote_full_path, local_full_path);
+                        } else {
+                            copy_file_from_remote(app, remote_full_path, local_full_path);
+                        }
+                    }
+                }
+                ssh_channel_send_eof(channel);
+                ssh_channel_close(channel);
+                ssh_channel_free(channel);
+            } else if (channel) {
+                ssh_channel_free(channel);
+            }
+        } else {
+            // Für SFTP: Prüfe über sftp_stat
+            sftp_attributes attrs = sftp_stat(app->sftp, remote_full_path);
+            if (attrs) {
+                if (attrs->type == SSH_FILEXFER_TYPE_DIRECTORY) {
+                    copy_directory_from_remote(app, remote_full_path, local_full_path);
+                } else {
+                    copy_file_from_remote(app, remote_full_path, local_full_path);
+                }
+                sftp_attributes_free(attrs);
+            }
+        }
+    }
+    
+    g_strfreev(lines);
+    g_free(text);
+    gtk_drag_finish(context, TRUE, FALSE, time);
+}
+
 void on_delete_local_clicked(GtkWidget *widget, gpointer data) {
     AppData *app = (AppData *)data;
     GtkTreeSelection *selection = gtk_tree_view_get_selection(GTK_TREE_VIEW(app->local_tree));
@@ -2309,6 +2683,39 @@ void on_delete_local_clicked(GtkWidget *widget, gpointer data) {
         gtk_label_set_text(GTK_LABEL(app->status_label), "No file selected");
         return;
     }
+    
+    // Filtere ".." und "." aus der Auswahl
+    GList *filtered_rows = NULL;
+    GList *iter = selected_rows;
+    while (iter) {
+        GtkTreePath *path = (GtkTreePath *)iter->data;
+        GtkTreeIter tree_iter;
+        
+        if (gtk_tree_model_get_iter(model, &tree_iter, path)) {
+            gchar *filename;
+            gtk_tree_model_get(model, &tree_iter, 0, &filename, -1);
+            
+            // Ignoriere ".." und "."
+            if (filename && strcmp(filename, "..") != 0 && strcmp(filename, ".") != 0) {
+                filtered_rows = g_list_append(filtered_rows, gtk_tree_path_copy(path));
+            }
+            
+            g_free(filename);
+        }
+        
+        iter = iter->next;
+    }
+    
+    // Gib die ursprüngliche Liste frei
+    g_list_free_full(selected_rows, (GDestroyNotify)gtk_tree_path_free);
+    
+    // Prüfe, ob nach dem Filtern noch Elemente übrig sind
+    if (!filtered_rows) {
+        gtk_label_set_text(GTK_LABEL(app->status_label), "No valid files selected ('.' and '..' are ignored)");
+        return;
+    }
+    
+    selected_rows = filtered_rows;
     
     // Zähle ausgewählte Elemente
     int count = g_list_length(selected_rows);
@@ -2425,6 +2832,39 @@ void on_delete_remote_clicked(GtkWidget *widget, gpointer data) {
         gtk_label_set_text(GTK_LABEL(app->status_label), "No file selected");
         return;
     }
+    
+    // Filtere ".." und "." aus der Auswahl
+    GList *filtered_rows = NULL;
+    GList *iter = selected_rows;
+    while (iter) {
+        GtkTreePath *path = (GtkTreePath *)iter->data;
+        GtkTreeIter tree_iter;
+        
+        if (gtk_tree_model_get_iter(model, &tree_iter, path)) {
+            gchar *filename;
+            gtk_tree_model_get(model, &tree_iter, 0, &filename, -1);
+            
+            // Ignoriere ".." und "."
+            if (filename && strcmp(filename, "..") != 0 && strcmp(filename, ".") != 0) {
+                filtered_rows = g_list_append(filtered_rows, gtk_tree_path_copy(path));
+            }
+            
+            g_free(filename);
+        }
+        
+        iter = iter->next;
+    }
+    
+    // Gib die ursprüngliche Liste frei
+    g_list_free_full(selected_rows, (GDestroyNotify)gtk_tree_path_free);
+    
+    // Prüfe, ob nach dem Filtern noch Elemente übrig sind
+    if (!filtered_rows) {
+        gtk_label_set_text(GTK_LABEL(app->status_label), "No valid files selected ('.' and '..' are ignored)");
+        return;
+    }
+    
+    selected_rows = filtered_rows;
     
     // Zähle ausgewählte Elemente
     int count = g_list_length(selected_rows);
@@ -3320,6 +3760,19 @@ GtkWidget* create_gui(AppData *data) {
     gtk_tree_view_append_column(GTK_TREE_VIEW(data->local_tree), column);
     
     g_signal_connect(data->local_tree, "row-activated", G_CALLBACK(on_local_row_activated), data);
+    g_signal_connect(data->local_tree, "key-press-event", G_CALLBACK(on_local_tree_key_press), data);
+    gtk_widget_set_can_focus(data->local_tree, TRUE);
+    
+    // Drag-and-Drop: Lokale TreeView als Drag-Source (für Drag zu Remote)
+    GtkTargetEntry targets[] = {
+        { "text/plain", 0, 0 }
+    };
+    gtk_tree_view_enable_model_drag_source(GTK_TREE_VIEW(data->local_tree), GDK_BUTTON1_MASK, targets, 1, GDK_ACTION_COPY);
+    g_signal_connect(data->local_tree, "drag-data-get", G_CALLBACK(on_local_drag_data_get), data);
+    
+    // Drag-and-Drop: Lokale TreeView als Drop-Target (für Drop von Remote)
+    gtk_tree_view_enable_model_drag_dest(GTK_TREE_VIEW(data->local_tree), targets, 1, GDK_ACTION_COPY);
+    g_signal_connect(data->local_tree, "drag-data-received", G_CALLBACK(on_local_drag_data_received), data);
     
     GtkWidget *local_scroll = gtk_scrolled_window_new(NULL, NULL);
     gtk_scrolled_window_set_policy(GTK_SCROLLED_WINDOW(local_scroll), GTK_POLICY_AUTOMATIC, GTK_POLICY_AUTOMATIC);
@@ -3382,6 +3835,19 @@ GtkWidget* create_gui(AppData *data) {
     gtk_tree_view_append_column(GTK_TREE_VIEW(data->remote_tree), column);
     
     g_signal_connect(data->remote_tree, "row-activated", G_CALLBACK(on_remote_row_activated), data);
+    g_signal_connect(data->remote_tree, "key-press-event", G_CALLBACK(on_remote_tree_key_press), data);
+    gtk_widget_set_can_focus(data->remote_tree, TRUE);
+    
+    // Drag-and-Drop: Remote TreeView als Drag-Source (für Drag zu Local)
+    GtkTargetEntry targets_remote[] = {
+        { "text/plain", 0, 0 }
+    };
+    gtk_tree_view_enable_model_drag_source(GTK_TREE_VIEW(data->remote_tree), GDK_BUTTON1_MASK, targets_remote, 1, GDK_ACTION_COPY);
+    g_signal_connect(data->remote_tree, "drag-data-get", G_CALLBACK(on_remote_drag_data_get), data);
+    
+    // Drag-and-Drop: Remote TreeView als Drop-Target (für Drop von Local)
+    gtk_tree_view_enable_model_drag_dest(GTK_TREE_VIEW(data->remote_tree), targets_remote, 1, GDK_ACTION_COPY);
+    g_signal_connect(data->remote_tree, "drag-data-received", G_CALLBACK(on_remote_drag_data_received), data);
     
     GtkWidget *remote_scroll = gtk_scrolled_window_new(NULL, NULL);
     gtk_scrolled_window_set_policy(GTK_SCROLLED_WINDOW(remote_scroll), GTK_POLICY_AUTOMATIC, GTK_POLICY_AUTOMATIC);
